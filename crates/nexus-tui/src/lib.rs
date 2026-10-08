@@ -1,14 +1,14 @@
-//! Zeta TUI v3 — opencode 风格极简界面。
+//! Zeta TUI v4 — 照 opencode 构图：ASCII banner 居中 + 左竖线输入框 + 全指标状态栏。
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use nexus_agent::{Agent, AgentEvent};
 use nexus_core::config::Config;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
@@ -17,8 +17,14 @@ const WARN: Color = Color::Rgb(190, 160, 110);
 const FAIL: Color = Color::Rgb(235, 120, 125);
 const MUTED: Color = Color::Rgb(105, 112, 122);
 const FAINT: Color = Color::Rgb(70, 76, 84);
+const BAR: Color = Color::Rgb(120, 130, 140);
 const PROMPT: char = '\u{276f}';
-const DOT: char = '\u{2b1a}';
+
+const BANNER: &[&str] = &[
+    "\u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}\u{2584} \u{2588}\u{2580}\u{2580}\u{2580} \u{2588}\u{2580}\u{2580}",
+    "\u{2588}  \u{2588} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580}\u{2580} \u{2588}  \u{2588} \u{2588}    \u{2588}  \u{2588} \u{2588}  \u{2588} \u{2588}\u{2580}\u{2580}",
+    "\u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}\u{2588} \u{2588}    \u{2588}\u{2580}\u{2580}\u{2584} \u{2588}\u{2580}\u{2580}\u{2580} \u{2588}\u{2580}\u{2580}\u{2580}",
+];
 
 pub async fn run_tui(cfg: Config) -> Result<()> {
     let mut terminal = ratatui::init();
@@ -34,6 +40,7 @@ struct UiState {
     input: String,
     status: String,
     metrics: nexus_agent::Metrics,
+    started: Option<std::time::Instant>,
     running: bool,
     scroll: u16,
     auto_scroll: bool,
@@ -51,30 +58,34 @@ impl UiState {
             self.scroll = 0;
         }
     }
-
     fn blank(&mut self) {
         self.push(Line::from(Span::raw("")));
     }
-
     fn tool_start(&mut self, name: &str, args: &str) {
-        let brief: String = args.replace('\n', " ").chars().take(60).collect();
+        let brief: String = args.replace('\n', " ").chars().take(56).collect();
         self.push(Line::from(Span::styled(
-            format!("{} {} {}", DOT, name, brief),
+            format!("\u{25b8} {} {}", name, brief),
             Style::default().fg(WARN),
         )));
         self.tool_line = Some(self.log.len() - 1);
     }
-
     fn tool_end(&mut self, name: &str, preview: &str) {
-        let prev: String = preview.replace('\n', " ").chars().take(90).collect();
+        let prev: String = preview.replace('\n', " ").chars().take(88).collect();
         let line = Line::from(Span::styled(
-            format!("{} {} \u{00b7} {}", DOT, name, prev),
+            format!("\u{25b8} {} \u{00b7} {}", name, prev),
             Style::default().fg(WARN),
         ));
         match self.tool_line.take() {
             Some(i) if i < self.log.len() => self.log[i] = line,
             _ => self.push(line),
         }
+    }
+    fn user(&mut self, s: &str) {
+        self.blank();
+        self.push(Line::from(Span::styled(
+            format!("{} {}", PROMPT, s),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
     }
 }
 
@@ -88,11 +99,6 @@ async fn tui_loop(cfg: Config, terminal: &mut Terminal<ratatui::backend::Crosste
     let mut ctrl_tx: Option<mpsc::UnboundedSender<TaskCtrl>> = None;
     let mut event_stream = EventStream::new();
     let mut quit = false;
-
-    st.push(Line::from(Span::styled(
-        format!("{} {} @ {}", PROMPT, cfg.provider.model, cfg.provider.base_url),
-        Style::default().fg(FAINT),
-    )));
 
     while !quit {
         let mut submitted = false;
@@ -119,19 +125,16 @@ async fn tui_loop(cfg: Config, terminal: &mut Terminal<ratatui::backend::Crosste
             st.running = false;
             st.status = "cancelled".into();
             st.push(Line::from(Span::styled("cancelled", Style::default().fg(FAIL))));
-            st.blank();
         }
 
         if submitted && !st.running {
             let prompt = st.input.trim().to_string();
             if !prompt.is_empty() {
                 st.input.clear();
-                st.push(Line::from(Span::styled(
-                    format!("{} {}", PROMPT, prompt),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                )));
+                st.user(&prompt);
                 st.running = true;
                 st.status = "working".into();
+                st.started = Some(std::time::Instant::now());
                 let (etx, erx) = mpsc::unbounded_channel::<AgentEvent>();
                 let (ctx, crx) = mpsc::unbounded_channel::<TaskCtrl>();
                 events_rx = Some(erx);
@@ -145,7 +148,7 @@ async fn tui_loop(cfg: Config, terminal: &mut Terminal<ratatui::backend::Crosste
             }
         }
 
-        draw(terminal, &st)?;
+        draw(terminal, &st, &cfg)?;
     }
     Ok(())
 }
@@ -226,7 +229,7 @@ fn apply_event(evt: AgentEvent, st: &mut UiState) {
                     Style::default().fg(ACCENT),
                 )));
             } else {
-                let d: String = detail.replace('\n', " ").chars().take(140).collect();
+                let d: String = detail.replace('\n', " ").chars().take(120).collect();
                 st.push(Line::from(Span::styled(
                     format!("\u{2717} acceptance failed - {}", d),
                     Style::default().fg(FAIL),
@@ -240,12 +243,11 @@ fn apply_event(evt: AgentEvent, st: &mut UiState) {
                 let c = if reason == "cancelled" { FAIL } else { ACCENT };
                 st.push(Line::from(Span::styled(reason, Style::default().fg(c))));
             }
-            st.blank();
             st.running = false;
             st.status = "ready".into();
         }
         AgentEvent::Error { message, retry_after_secs } => {
-            let m: String = message.replace('\n', " ").chars().take(150).collect();
+            let m: String = message.replace('\n', " ").chars().take(120).collect();
             st.push(Line::from(Span::styled(
                 format!("error, retry {}s: {}", retry_after_secs, m),
                 Style::default().fg(FAIL),
@@ -254,46 +256,94 @@ fn apply_event(evt: AgentEvent, st: &mut UiState) {
     }
 }
 
-fn draw(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, st: &UiState) -> Result<()> {
+fn draw(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, st: &UiState, cfg: &Config) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
-        let rows = Layout::vertical([Constraint::Min(4), Constraint::Length(3), Constraint::Length(1)]).split(area);
+        let rows = Layout::vertical([
+            Constraint::Min(3),    // log / banner
+            Constraint::Length(4), // 输入（左竖线三行）
+            Constraint::Length(2), // 键位提示 + 空隙
+            Constraint::Length(1), // 状态栏
+        ])
+        .split(area);
 
-        let visible = rows[0].height as usize;
-        let total = st.log.len();
-        let end = total.saturating_sub(st.scroll as usize);
-        let start = end.saturating_sub(visible);
-        let mut lines: Vec<Line> = if start < end { st.log[start..end].to_vec() } else { vec![] };
-        for l in lines.iter_mut() {
-            l.spans.insert(0, Span::raw("  "));
-        }
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
-
-        let (label, accent) = if st.running {
-            (" working - esc to cancel ", WARN)
+        if st.log.is_empty() {
+            // 空闲态：居中 banner + 模型行（opencode 同款构图）
+            let mut lines: Vec<Line> = vec![];
+            for b in BANNER {
+                lines.push(Line::from(Span::styled(*b, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))));
+            }
+            lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::styled(
+                format!("  zeta v{} \u{00b7} {} \u{00b7} rust harness", env!("CARGO_PKG_VERSION"), cfg.provider.model),
+                Style::default().fg(FAINT),
+            )));
+            f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), rows[0]);
         } else {
-            (" ", ACCENT)
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(if st.running { FAINT } else { accent }))
-            .title(Span::styled(label, Style::default().fg(FAINT)));
-        let body = format!("{} {}", PROMPT, st.input);
-        f.render_widget(Paragraph::new(body).block(block), rows[1]);
+            let visible = rows[0].height as usize;
+            let total = st.log.len();
+            let end = total.saturating_sub(st.scroll as usize);
+            let start = end.saturating_sub(visible);
+            let lines: Vec<Line> = if start < end { st.log[start..end].to_vec() } else { vec![] };
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+        }
 
-        let m = &st.metrics;
+        // 输入区：左竖线 ┃ + 内容 + 底部 ╹▀▀▀（opencode 同款）
+        let vbar = Span::styled("\u{2503} ", Style::default().fg(BAR));
+        let mut input_lines: Vec<Line> = vec![
+            Line::from(Span::styled("\u{2503}", Style::default().fg(BAR))),
+        ];
+        if st.running {
+            input_lines.push(Line::from(vec![
+                vbar.clone(),
+                Span::styled(" working... (esc to cancel)", Style::default().fg(WARN)),
+            ]));
+        } else {
+            input_lines.push(Line::from(vec![
+                vbar.clone(),
+                Span::styled(" ", Style::default()),
+                Span::styled(st.input.clone(), Style::default()),
+            ]));
+        }
+        input_lines.push(Line::from(Span::styled(
+            "\u{2579}\u{2580}\u{2580}".to_string() + &"\u{2580}".repeat(60),
+            Style::default().fg(BAR),
+        )));
+        f.render_widget(Paragraph::new(input_lines), rows[1]);
+
+        // 键位提示（输入框下，靠左缩进）
+        let hint = if st.running {
+            "  tab agents  esc cancel  ctrl+c quit"
+        } else {
+            "  enter submit  esc cancel  ctrl+c quit"
+        };
+        f.render_widget(Paragraph::new(Span::styled(hint, Style::default().fg(FAINT))), rows[2]);
+
+        // 全指标状态栏
+        let m = st.metrics;
+        let secs = st.started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         let left = format!(
-            " {} | cache {:.0}% | {:.0} tok/s | {} memories",
-            st.status, m.cache_hit_rate * 100.0, m.tok_per_sec, m.memories
+            " {} \u{00b7} cache {:.0}% \u{00b7} {:.0} tok/s \u{00b7} prompt {} tok \u{00b7} compacted {} \u{00b7} sub {} \u{00b7} cron {} \u{00b7} mem {} \u{00b7} err {} \u{00b7} temp {:.1} \u{00b7} ram {}/{} MB",
+            st.status,
+            m.cache_hit_rate * 100.0,
+            m.tok_per_sec,
+            m.prompt_chars / 2,
+            m.compacted_tokens,
+            m.subagents,
+            m.scheduled,
+            m.memories,
+            m.errors,
+            m.temperature,
+            m.mem_used_mb,
+            m.mem_total_mb,
         );
-        let right = " enter submit \u{00b7} esc cancel \u{00b7} ^c quit ";
+        let right = format!(" up {:02}:{:02}:{:02} ", secs / 3600, (secs % 3600) / 60, secs % 60);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(left, Style::default().fg(MUTED)),
                 Span::styled(right, Style::default().fg(FAINT)),
             ])),
-            rows[2],
+            rows[3],
         );
     })?;
     Ok(())
