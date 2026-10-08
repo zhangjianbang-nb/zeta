@@ -1,0 +1,14 @@
+{
+  "name": "zeta-harness",
+  "version": "0.1.0",
+  "description": "Zeta - Rust multimodal agent harness (coding + general agent, anti-loop guards, acceptance protocol, 24h daemon, TUI).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhangjianbang-nb/zeta.git"
+  },
+  "bin": { "zeta": "bin/zeta.js" },
+  "files": ["bin/", "README.md"],
+  "keywords": ["agent", "rust", "llm", "tui", "multimodal"],
+  "engines": { "node": ">=16" }
+}

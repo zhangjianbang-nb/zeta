@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nexus-core",
+    "crates/nexus-guard",
+    "crates/nexus-memory",
+    "crates/nexus-provider",
+    "crates/nexus-tools",
+    "crates/nexus-agent",
+    "crates/nexus-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+futures = "0.3"
+toml = "0.8"
+dirs = "5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

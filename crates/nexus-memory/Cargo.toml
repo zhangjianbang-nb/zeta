@@ -1,0 +1,13 @@
+[package]
+name = "nexus-memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nexus-core = { path = "../nexus-core" }
+anyhow.workspace = true
+serde.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "nexus-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nexus-core = { path = "../nexus-core" }
+nexus-guard = { path = "../nexus-guard" }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+base64 = "0.22"
+tracing.workspace = true

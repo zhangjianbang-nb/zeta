@@ -1,0 +1,11 @@
+[package]
+name = "nexus-guard"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nexus-core = { path = "../nexus-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

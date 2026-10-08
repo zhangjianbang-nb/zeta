@@ -1,0 +1,5 @@
+/target
+npm/bin/*.tar.gz
+npm/bin/zeta-*
+!npm/bin/zeta.js
+*.log
