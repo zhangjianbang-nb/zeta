@@ -112,24 +112,32 @@ impl Agent {
         let specs = self.all_specs();
         let policy = CachePolicy::default();
         let mut final_text = String::new();
+        let mut last_tok_per_sec: f64 = 0.0;
 
         for step in 0..self.cfg.max_steps {
             let mut metrics = crate::metrics::Metrics {
                 step,
                 cache_hit_rate: self.cache.hit_rate(),
-                temperature: 1.0,
+                prompt_tokens: self.cache.prompt_tokens,
                 ..Default::default()
             };
-            let (used, total) = crate::metrics::Metrics::read_system_memory();
-            metrics.mem_used_mb = used;
-            metrics.mem_total_mb = total;
+            let (gpu_used, gpu_total, gpu_temp) = crate::metrics::Metrics::read_gpu();
+            metrics.gpu_used_mb = gpu_used;
+            metrics.gpu_total_mb = gpu_total;
+            metrics.gpu_temp = gpu_temp;
             metrics.memories = { self.memory.lock().await.len() };
+            metrics.tok_per_sec = last_tok_per_sec;
             let _ = self.event_tx.send(AgentEvent::Status { metrics });
 
             compact_session(&mut self.session, &policy);
 
+            let call_start = std::time::Instant::now();
             let result = self.call_with_backoff(&specs, &mut watchdog).await?;
+            let elapsed = call_start.elapsed().as_secs_f64();
             self.cache.record(result.usage.prompt_tokens, result.usage.cached_tokens);
+            if elapsed > 0.0 && result.usage.completion_tokens > 0 {
+                last_tok_per_sec = result.usage.completion_tokens as f64 / elapsed;
+            }
             if !result.reasoning.is_empty() {
                 let _ = self.event_tx.send(AgentEvent::ReasoningDelta(result.reasoning.clone()));
             }
