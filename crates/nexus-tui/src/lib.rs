@@ -1,4 +1,4 @@
-//! Zeta TUI — opencode 风格界面（v2）。
+//! Zeta TUI v3 — opencode 风格极简界面。
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -12,12 +12,13 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 
-const ACCENT: Color = Color::Rgb(126, 231, 135);
-const WARN: Color = Color::Rgb(224, 175, 104);
-const FAIL: Color = Color::Rgb(240, 113, 120);
-const MUTED: Color = Color::Rgb(110, 118, 129);
-const THINK: Color = Color::Rgb(90, 98, 110);
+const ACCENT: Color = Color::Rgb(140, 235, 150);
+const WARN: Color = Color::Rgb(190, 160, 110);
+const FAIL: Color = Color::Rgb(235, 120, 125);
+const MUTED: Color = Color::Rgb(105, 112, 122);
+const FAINT: Color = Color::Rgb(70, 76, 84);
 const PROMPT: char = '\u{276f}';
+const DOT: char = '\u{2b1a}';
 
 pub async fn run_tui(cfg: Config) -> Result<()> {
     let mut terminal = ratatui::init();
@@ -37,28 +38,43 @@ struct UiState {
     scroll: u16,
     auto_scroll: bool,
     cancel: bool,
+    tool_line: Option<usize>,
 }
 
 impl UiState {
     fn push(&mut self, line: Line<'static>) {
         self.log.push(line);
-        if self.log.len() > 2000 {
-            self.log.drain(..500);
+        if self.log.len() > 3000 {
+            self.log.drain(..1000);
         }
         if self.auto_scroll {
             self.scroll = 0;
         }
     }
 
-    fn info(&mut self, s: String) {
-        self.push(Line::from(Span::styled(s, Style::default().fg(MUTED))));
+    fn blank(&mut self) {
+        self.push(Line::from(Span::raw("")));
     }
 
-    fn user(&mut self, s: &str) {
+    fn tool_start(&mut self, name: &str, args: &str) {
+        let brief: String = args.replace('\n', " ").chars().take(60).collect();
         self.push(Line::from(Span::styled(
-            format!("{} {}", PROMPT, s),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            format!("{} {} {}", DOT, name, brief),
+            Style::default().fg(WARN),
         )));
+        self.tool_line = Some(self.log.len() - 1);
+    }
+
+    fn tool_end(&mut self, name: &str, preview: &str) {
+        let prev: String = preview.replace('\n', " ").chars().take(90).collect();
+        let line = Line::from(Span::styled(
+            format!("{} {} \u{00b7} {}", DOT, name, prev),
+            Style::default().fg(WARN),
+        ));
+        match self.tool_line.take() {
+            Some(i) if i < self.log.len() => self.log[i] = line,
+            _ => self.push(line),
+        }
     }
 }
 
@@ -73,7 +89,10 @@ async fn tui_loop(cfg: Config, terminal: &mut Terminal<ratatui::backend::Crosste
     let mut event_stream = EventStream::new();
     let mut quit = false;
 
-    st.info(format!("zeta v{} | {} @ {}", env!("CARGO_PKG_VERSION"), cfg.provider.model, cfg.provider.base_url));
+    st.push(Line::from(Span::styled(
+        format!("{} {} @ {}", PROMPT, cfg.provider.model, cfg.provider.base_url),
+        Style::default().fg(FAINT),
+    )));
 
     while !quit {
         let mut submitted = false;
@@ -99,16 +118,20 @@ async fn tui_loop(cfg: Config, terminal: &mut Terminal<ratatui::backend::Crosste
             }
             st.running = false;
             st.status = "cancelled".into();
-            st.info("[cancelled by user]".to_string());
+            st.push(Line::from(Span::styled("cancelled", Style::default().fg(FAIL))));
+            st.blank();
         }
 
         if submitted && !st.running {
             let prompt = st.input.trim().to_string();
             if !prompt.is_empty() {
                 st.input.clear();
-                st.user(&prompt);
+                st.push(Line::from(Span::styled(
+                    format!("{} {}", PROMPT, prompt),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )));
                 st.running = true;
-                st.status = "running".into();
+                st.status = "working".into();
                 let (etx, erx) = mpsc::unbounded_channel::<AgentEvent>();
                 let (ctx, crx) = mpsc::unbounded_channel::<TaskCtrl>();
                 events_rx = Some(erx);
@@ -133,31 +156,29 @@ fn term_event(
     quit: &mut bool,
     submitted: &mut bool,
 ) {
-    match maybe {
-        Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => {
-            if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
-                *quit = true;
-            } else if k.code == KeyCode::Esc && st.running {
-                st.cancel = true;
-            } else if k.code == KeyCode::Up {
-                st.auto_scroll = false;
-                st.scroll = st.scroll.saturating_add(3);
-            } else if k.code == KeyCode::Down {
-                st.scroll = st.scroll.saturating_sub(3);
-                if st.scroll == 0 {
-                    st.auto_scroll = true;
-                }
-            } else if k.code == KeyCode::Enter {
-                *submitted = !st.running && !st.input.trim().is_empty();
-            } else if k.code == KeyCode::Backspace {
-                st.input.pop();
-            } else if let KeyCode::Char(c) = k.code {
-                st.input.push(c);
-            }
+    if let Some(Ok(Event::Key(k))) = maybe {
+        if k.kind != KeyEventKind::Press {
+            return;
         }
-        Some(Ok(_)) => {}
-        Some(Err(_)) => {}
-        None => {}
+        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+            *quit = true;
+        } else if k.code == KeyCode::Esc && st.running {
+            st.cancel = true;
+        } else if k.code == KeyCode::Up {
+            st.auto_scroll = false;
+            st.scroll = st.scroll.saturating_add(4);
+        } else if k.code == KeyCode::Down {
+            st.scroll = st.scroll.saturating_sub(4);
+            if st.scroll == 0 {
+                st.auto_scroll = true;
+                       }
+        } else if k.code == KeyCode::Enter {
+            *submitted = !st.running && !st.input.trim().is_empty();
+        } else if k.code == KeyCode::Backspace {
+            st.input.pop();
+        } else if let KeyCode::Char(c) = k.code {
+            st.input.push(c);
+        }
     }
 }
 
@@ -173,16 +194,14 @@ async fn spawn_and_forward(
         agent.run_task(&prompt).await
     };
     tokio::select! {
-        r = run => {
-            match r {
-                Ok(_) => { let _ = tx.send(AgentEvent::Done { reason: "task finished".into() }); Ok(()) }
-                Err(e) => {
-                    let _ = tx.send(AgentEvent::Error { message: format!("{:#}", e), retry_after_secs: 0 });
-                    let _ = tx.send(AgentEvent::Done { reason: "task failed".into() });
-                    Err(e)
-                }
+        r = run => match r {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let _ = tx.send(AgentEvent::Error { message: format!("{:#}", e), retry_after_secs: 0 });
+                let _ = tx.send(AgentEvent::Done { reason: "failed".into() });
+                Err(e)
             }
-        }
+        },
         _ = ctrl.recv() => {
             let _ = tx.send(AgentEvent::Done { reason: "cancelled".into() });
             Ok(())
@@ -197,54 +216,40 @@ fn apply_event(evt: AgentEvent, st: &mut UiState) {
                 st.push(Line::from(Span::raw(line.to_string())));
             }
         }
-        AgentEvent::ReasoningDelta(t) => {
-            if !t.trim().is_empty() {
-                st.push(Line::from(Span::styled(t, Style::default().fg(THINK))));
-            }
-        }
-        AgentEvent::ToolStart { name, args } => {
-            let brief: String = args.chars().take(72).collect();
-            st.push(Line::from(Span::styled(
-                format!("  + {} {}", name, brief),
-                Style::default().fg(WARN),
-            )));
-        }
-        AgentEvent::ToolEnd { name, output_preview } => {
-            let prev: String = output_preview.replace('\n', " / ").chars().take(110).collect();
-            st.push(Line::from(Span::styled(
-                format!("  = {} {}", name, prev),
-                Style::default().fg(WARN),
-            )));
-        }
+        AgentEvent::ReasoningDelta(_) => {}
+        AgentEvent::ToolStart { name, args } => st.tool_start(&name, &args),
+        AgentEvent::ToolEnd { name, output_preview } => st.tool_end(&name, &output_preview),
         AgentEvent::Acceptance { passed, detail } => {
             if passed {
                 st.push(Line::from(Span::styled(
-                    "  [acceptance PASSED] evidence replayed, exit 0",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    "\u{2713} acceptance passed (evidence replayed, exit 0)",
+                    Style::default().fg(ACCENT),
                 )));
             } else {
+                let d: String = detail.replace('\n', " ").chars().take(140).collect();
                 st.push(Line::from(Span::styled(
-                    "  [acceptance FAILED] fix and resubmit",
-                    Style::default().fg(FAIL).add_modifier(Modifier::BOLD),
+                    format!("\u{2717} acceptance failed - {}", d),
+                    Style::default().fg(FAIL),
                 )));
-                st.push(Line::from(Span::styled(detail, Style::default().fg(FAIL))));
             }
         }
-        AgentEvent::Status { metrics } => {
-            st.metrics = metrics;
-        }
+        AgentEvent::Status { metrics } => st.metrics = metrics,
         AgentEvent::Done { reason } => {
-            st.push(Line::from(Span::styled(format!("  [done] {}", reason), Style::default().fg(ACCENT))));
+            st.tool_line = None;
+            if reason != "no more tool calls" {
+                let c = if reason == "cancelled" { FAIL } else { ACCENT };
+                st.push(Line::from(Span::styled(reason, Style::default().fg(c))));
+            }
+            st.blank();
             st.running = false;
             st.status = "ready".into();
         }
         AgentEvent::Error { message, retry_after_secs } => {
-            let m: String = message.chars().take(180).collect();
+            let m: String = message.replace('\n', " ").chars().take(150).collect();
             st.push(Line::from(Span::styled(
-                format!("  [error, retry {}s] {}", retry_after_secs, m),
+                format!("error, retry {}s: {}", retry_after_secs, m),
                 Style::default().fg(FAIL),
             )));
-            st.status = format!("retrying {}s", retry_after_secs);
         }
     }
 }
@@ -252,51 +257,44 @@ fn apply_event(evt: AgentEvent, st: &mut UiState) {
 fn draw(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, st: &UiState) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(4),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(area);
+        let rows = Layout::vertical([Constraint::Min(4), Constraint::Length(3), Constraint::Length(1)]).split(area);
 
-        let header = Line::from(vec![
-            Span::styled(" zeta ", Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!(" {:.0} tok/s | cache {:.0}% | step {} | mem {} MB ", st.metrics.tok_per_sec, st.metrics.cache_hit_rate * 100.0, st.metrics.step, st.metrics.mem_used_mb),
-                Style::default().fg(MUTED),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(header), chunks[0]);
-
-        let visible = chunks[1].height.saturating_sub(2) as usize;
+        let visible = rows[0].height as usize;
         let total = st.log.len();
         let end = total.saturating_sub(st.scroll as usize);
         let start = end.saturating_sub(visible);
-        let lines: Vec<Line> = if start < end { st.log[start..end].to_vec() } else { vec![] };
-        let log_block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded);
-        f.render_widget(Paragraph::new(lines).block(log_block).wrap(Wrap { trim: false }), chunks[1]);
+        let mut lines: Vec<Line> = if start < end { st.log[start..end].to_vec() } else { vec![] };
+        for l in lines.iter_mut() {
+            l.spans.insert(0, Span::raw("  "));
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
 
-        let (label, color) = if st.running {
-            (" running - Esc to cancel ", WARN)
+        let (label, accent) = if st.running {
+            (" working - esc to cancel ", WARN)
         } else {
-            (" ask anything ", ACCENT)
+            (" ", ACCENT)
         };
-        let input_block = Block::default()
+        let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(color))
-            .title(Span::styled(label, Style::default().fg(color)));
-        let body = if st.running { st.input.clone() } else { format!("{} {}", PROMPT, st.input) };
-        f.render_widget(Paragraph::new(body).block(input_block), chunks[2]);
+            .border_style(Style::default().fg(if st.running { FAINT } else { accent }))
+            .title(Span::styled(label, Style::default().fg(FAINT)));
+        let body = format!("{} {}", PROMPT, st.input);
+        f.render_widget(Paragraph::new(body).block(block), rows[1]);
 
-        let left = format!(" {} | memories {} | err {}", st.status, st.metrics.memories, st.metrics.errors);
-        let right = " Enter submit | Esc cancel | Ctrl+C quit ";
-        let sb = Line::from(vec![
-            Span::styled(left, Style::default().fg(MUTED)),
-            Span::styled(right, Style::default().fg(THINK)),
-        ]);
-        f.render_widget(Paragraph::new(sb), chunks[3]);
+        let m = &st.metrics;
+        let left = format!(
+            " {} | cache {:.0}% | {:.0} tok/s | {} memories",
+            st.status, m.cache_hit_rate * 100.0, m.tok_per_sec, m.memories
+        );
+        let right = " enter submit \u{00b7} esc cancel \u{00b7} ^c quit ";
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(left, Style::default().fg(MUTED)),
+                Span::styled(right, Style::default().fg(FAINT)),
+            ])),
+            rows[2],
+        );
     })?;
     Ok(())
 }
